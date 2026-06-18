@@ -335,7 +335,10 @@ end
 
 function Element:Render()
     local X, Y, Width = self.X, self.Y, self.Width
-    local RightEdge   = X + Width      -- consistent right edge for all swatch columns
+
+    -- Use the section's authoritative right edge so every row's swatches
+    -- land in the exact same column regardless of per-element X+Width rounding.
+    local AnchorRight = self.SectionRightEdge or (X + Width)
 
     -- ── Toggle ────────────────────────────────────────────
     if self.Type == "Toggle" then
@@ -343,7 +346,7 @@ function Element:Render()
 
         -- Draw attached color picker swatches (rightmost = index 0)
         for Index, Picker in ipairs(self.AttachedColorPickers) do
-            local SX = SwatchX(RightEdge, Index - 1)
+            local SX = SwatchX(AnchorRight, Index - 1)
             Library:DrawSwatch(SX, Y+1, Color3.fromRGB(Picker.Color[1], Picker.Color[2], Picker.Color[3]), Picker.Alpha)
 
             if Library.Input.MouseClicked and not Library.Input.Consumed and Library:IsHovering(SX, Y+1, SW, 13) then
@@ -357,7 +360,7 @@ function Element:Render()
         if self.AttachedKeyPicker then
             local KP       = self.AttachedKeyPicker
             local NumSwatches = #self.AttachedColorPickers
-            local BadgeRightEdge = RightEdge - NumSwatches * (SW + SG)
+            local BadgeRightEdge = AnchorRight - NumSwatches * (SW + SG)
             local BadgeLabel = KP.Capturing and "..." or ("[" .. KP.BoundKey .. "]")
             local BadgeWidth = #BadgeLabel * 7 + 10
             local BX = BadgeRightEdge - BadgeWidth - (NumSwatches > 0 and SG or 0)
@@ -365,12 +368,15 @@ function Element:Render()
             local Hovered = Library:IsHovering(BX, BY, BadgeWidth, 14)
             Library:DrawKeyPickerBadge(BX, BY, BadgeLabel, KP.Capturing, Hovered)
 
-            -- Left click: begin capture
+            -- Left click: begin capture.
+            -- _CaptureSkipFrame ensures the triggering LeftButton press is
+            -- never immediately recorded as the new keybind.
             if Library.Input.MouseClicked and not Library.Input.Consumed and Hovered then
-                Library.Input.Consumed = true
-                KP.Capturing    = true
-                KP.ContextOpen  = false
-                Library.CapturingKeyPicker = KP
+                Library.Input.Consumed       = true
+                KP.Capturing                 = true
+                KP.ContextOpen               = false
+                KP._CaptureSkipFrame         = true
+                Library.CapturingKeyPicker   = KP
             end
 
             -- Right click: context menu
@@ -447,8 +453,9 @@ function Element:Render()
     -- ── ColorPicker (standalone) ──────────────────────────
     elseif self.Type == "ColorPicker" then
         Library:DrawLabel(X, Y+2, self.Name, Library.Appearance.Coloring.White)
-        -- Aligned to the same column as toggle-attached swatches
-        local SX = RightEdge - SW - 3
+        -- Use SwatchX(AnchorRight, 0) — identical formula to a single chained picker,
+        -- so standalone and Toggle-attached swatches share the same right column.
+        local SX = SwatchX(AnchorRight, 0)
         Library:DrawSwatch(SX, Y+1, Color3.fromRGB(self.Color[1], self.Color[2], self.Color[3]), self.Alpha)
         if Library.Input.MouseClicked and not Library.Input.Consumed and Library:IsHovering(SX, Y+1, SW, 13) then
             Library.Input.Consumed = true
@@ -553,10 +560,15 @@ function Section:Render(X, Y, Width)
     local CursorX    = X + Padding
     local CursorY    = Y + HeaderHeight
     local InnerWidth = Width - Padding * 2
+    -- Authoritative right edge for all swatch columns in this section.
+    -- Stored on each element so Render() never recomputes it from X+Width,
+    -- which can drift by ±1px due to integer math on different rows.
+    local SectionRightEdge = CursorX + InnerWidth
 
     for _, El in ipairs(self.Elements) do
         if not El.Hidden then
             El.X, El.Y, El.Width = CursorX, CursorY, InnerWidth
+            El.SectionRightEdge  = SectionRightEdge
             El:Render()
             CursorY = CursorY + El.Height
         end
@@ -654,15 +666,25 @@ function Window.New(Options)
 
         local PressedKeys = getpressedkeys()
 
-        -- Key capture for KeyPickers
+        -- Key capture for KeyPickers.
+        -- We skip the very first frame after capture begins so that the
+        -- LeftButton that triggered the click is never recorded as the keybind.
         if Library.CapturingKeyPicker then
-            for _, Key in ipairs(PressedKeys) do
-                if Key ~= "LeftButton" and Key ~= "RightButton" and Key ~= "" then
-                    Library.CapturingKeyPicker.BoundKey   = Key
-                    Library.CapturingKeyPicker.Capturing  = false
-                    Library.CapturingKeyPicker:SyncFlag()
-                    Library.CapturingKeyPicker = nil
-                    break
+            if Library.CapturingKeyPicker._CaptureSkipFrame then
+                -- First frame: clear the skip flag and do nothing else.
+                Library.CapturingKeyPicker._CaptureSkipFrame = false
+            else
+                -- From the second frame onward, accept any non-mouse key.
+                for _, Key in ipairs(PressedKeys) do
+                    if Key ~= "LeftButton" and Key ~= "RightButton"
+                       and Key ~= "MouseButton1" and Key ~= "MouseButton2"
+                       and Key ~= "" then
+                        Library.CapturingKeyPicker.BoundKey  = Key
+                        Library.CapturingKeyPicker.Capturing = false
+                        Library.CapturingKeyPicker:SyncFlag()
+                        Library.CapturingKeyPicker = nil
+                        break
+                    end
                 end
             end
         end
